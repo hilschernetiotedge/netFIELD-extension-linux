@@ -1,5 +1,8 @@
 #!/bin/bash -e
-version="1.0.0"
+version="1.0.1"
+
+AZIOT_VERSION="1.4.2"
+AZIOT_IDENTITY_VERSION="1.4.1"
 
 usage() {
 	cat <<EOF >&2
@@ -16,23 +19,6 @@ Options:
 EOF
 	exit 1
 }
-
-function json_extract() {
-  local key=$1
-  local json=$2
-
-  local string_regex='"([^"\]|\\.)*"'
-  local number_regex='-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?'
-  local value_regex="${string_regex}|${number_regex}|true|false|null"
-  local pair_regex="\"${key}\"[[:space:]]*:[[:space:]]*(${value_regex})"
-
-  if [[ ${json} =~ ${pair_regex} ]]; then
-    echo $(sed 's/^"\|"$//g' <<< "${BASH_REMATCH[1]}")
-  else
-    return 1
-  fi
-}
-
 
 print_verbose() {
 	if [ "$verbose" = "1" ]; then
@@ -244,18 +230,19 @@ install_prerequisites() {
 
 		if ! command -v docker >/dev/null; then
 			print_verbose "docker not found: Installing moby"
-			curl -s -L https://packages.microsoft.com/config/"$ID"/"$VERSION_ID"/prod.list > /etc/apt/sources.list.d/microsoft-prod.list
-            sed -i 's/arch=amd64/arch=amd64,arm64,armhf/g' /etc/apt/sources.list.d/microsoft-prod.list
-			
-            # special treatment of ubuntu 18.04
-            if [ "$ID" = "ubuntu" ]; then
-                if [ "$VERSION_ID" = "18.04" ]; then
-                    sed -i 's@https://packages.microsoft.com/ubuntu/18.04/prod@https://packages.microsoft.com/ubuntu/18.04/multiarch/prod@g' /etc/apt/sources.list.d/microsoft-prod.list
-                fi
-            fi
-            
-            curl -s -L https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /etc/apt/trusted.gpg.d/microsoft.gpg
-			packages_to_install="$packages_to_install moby-engine moby-cli"
+
+			# Convert distributor id to lowercase, e.g. "Debian" => "debian"
+			lower_id=$(echo $ID | tr '[:upper:]' '[:lower:]')
+
+			sudo mkdir -p /etc/apt/keyrings
+			curl -fsSL https://download.docker.com/linux/$lower_id/gpg  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+			chmod a+r /etc/apt/keyrings/docker.gpg
+
+			echo \
+				"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$lower_id $(lsb_release -cs) stable" \
+				| sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+			packages_to_install="$packages_to_install docker-ce docker-ce-cli containerd.io docker-compose-plugin"
 		fi
 
 		if [ -n "$packages_to_install" ]; then
@@ -268,15 +255,23 @@ install_prerequisites() {
 		setup_second_docker_instance
 
 		if ! command -v iotedge >/dev/null; then
-			packages="aziot-edge_1.2.7-1_${ID}${VERSION_ID}_$(dpkg --print-architecture).deb \
-				  aziot-identity-service_1.2.5-1_${ID}${VERSION_ID}_$(dpkg --print-architecture).deb"
+			
 			tmpdir=$(mktemp -d)
 			cd "$tmpdir"
+
+			os_version_arch="${ID}${VERSION_ID}_$(dpkg --print-architecture)"
+			
+			# aziot-edge depends on aziot-identity-service, which should be installed first.
+			packages="aziot-identity-service_${AZIOT_IDENTITY_VERSION}-1_${os_version_arch}.deb \
+				  aziot-edge_${AZIOT_VERSION}-1_${os_version_arch}.deb"
+
+			apt-get update
+
 			for package in $packages; do
-				curl -s -L https://github.com/Azure/azure-iotedge/releases/download/1.2.7/"$package" > "$package"
+				curl -s -L https://github.com/Azure/azure-iotedge/releases/download/"${AZIOT_VERSION}"/"$package" > "$package"
+				apt-get install -y "$tmpdir/$package"
 			done
-			# shellcheck disable=SC2086
-			dpkg -i $packages
+
 			cd -
 			rm -rf "$tmpdir"
 
@@ -287,76 +282,6 @@ install_prerequisites() {
 		export PATH="$OLDPATH"
 
 		;;
-	fedora-35|fedora-34|centos-8|rhel-8)
-
-		print_verbose "Detected rpm/dnf based system"
-
-		if [ "$(uname -m)" != "x86_64" ]; then
-			echo "!!! Only x86_64 platform is supported on rpm based systems"
-			exit 1
-		fi
-
-		 if ! command -v openssl >/dev/null; then
-			print_verbose "openssl not found: Installing openssl"
-			packages_to_install="$packages_to_install openssl"
-		fi
-
-		if ! command -v brctl >/dev/null; then
-			print_verbose "brctl not found: Installing bridge-utils"
-			packages_to_install="$packages_to_install bridge-utils"
-		fi
-
-		if ! command -v jq >/dev/null; then
-			print_verbose "jq not found: Installing jq"
-			packages_to_install="$packages_to_install jq"
-		fi
-
-		if ! command -v docker >/dev/null; then
-			print_verbose "docker not found: Installing moby"
-			packages_to_install="$packages_to_install moby-engine"
-		fi
-
-		if [ -n "$packages_to_install" ]; then
-			# shellcheck disable=SC2086
-			dnf install -y $packages_to_install
-		fi
-
-		# Prepare 2nd docker instance
-		setup_second_docker_instance
-
-		# Disable SELinux, as it currently conflicts with iotedge/containers
-		if [ -e "/etc/selinux/config" ]; then
-			print_verbose "Setting SELinux to permissive mode, otherwise iotedge may not work correctly"
-			setenforce Permissive
-			sed -i -e 's/^SELINUX=.*/SELINUX=permissive/g' /etc/selinux/config
-		fi
-
-		if ! command -v iotedge >/dev/null; then
-			if [ "$ID-$VERSION_ID" = "fedora-34" ] || [ "$ID-$VERSION_ID" = "fedora-35" ]; then
-				print_verbose "iotedge: Installing backport of openssl 1.0"
-				curl -s -L \
-				    https://download-ib01.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/c/compat-openssl10-1.0.2o-11.fc33.x86_64.rpm \
-				    > /tmp/compat-openssl10-1.0.2o-11.fc33-x86_64.rpm
-				dnf install -y /tmp/compat-openssl10*.rpm
-				rm /tmp/compat-openssl10*.rpm
-			fi
-
-			print_verbose "iotedge: Installing aziot-edge"
-			packages="aziot-edge-1.2.7-1.el7.x86_64.rpm \
-				  aziot-identity-service-1.2.5-1.x86_64.rpm"
-			tmpdir=$(mktemp -d)
-			cd "$tmpdir"
-			for package in $packages; do
-				curl -s -L https://github.com/Azure/azure-iotedge/releases/download/1.2.7/"$package" > "$package"
-				install_packages="$install_packages $tmpdir/$package"
-			done
-			# shellcheck disable=SC2086
-			dnf install -y $install_packages
-			cd -
-			rm -rf "$tmpdir"
-		fi
-
-		;;
 	*)
 		echo "Unsupported linux distribution $ID-$VERSION_ID"
 		exit 1
@@ -364,16 +289,16 @@ install_prerequisites() {
 	esac
 
 	# Detect iotedge version
-	iotedgeversion=$(iotedge version | cut -d ' ' -f 2 | grep -o '^1.[012]')
+	iotedgeversion=$(iotedge version | cut -d ' ' -f 2 | grep -o '^1.[01234]')
 	print_verbose "iotedge: Detected version $iotedgeversion"
 	case "$iotedgeversion" in
-		1.0|1.1)
+		1.[01])
 			# Patch docker socket of 2nd docker instance into configuation
 			sed -i.bak -e "s@\([ ]\)+uri: .*@\1uri: \"unix:///run/iotedge-docker.sock\"@g" \
 				   -e "s@^hostname:@hostname: \"$(hostname)\"@g" \
 				   /etc/iotedge/config.yaml
 			;;
-		1.2)
+		1.[234])
 			# Patch docker socket of 2nd docker instance into configuation
 			sed -i.bak -e "s@^uri =.*@uri = \"unix:///run/iotedge-docker.sock\"@g" /etc/aziot/edged/config.toml.default
 			sed -i.bak -e "s@^uri =.*@uri = \"unix:///run/iotedge-docker.sock\"@g" /etc/aziot/config.toml.edge.template
@@ -480,16 +405,181 @@ create_device() {
 	new_device=$response
 }
 
+get_access_token_from_workspace() {
+  local wsId="${1}"
+  local wsName="${2}"
+  local wsToken="${3}"
+
+  echo "Loggin into $wsName workspace"
+
+  execute_cloud_command "POST" "$apiinstance/v1/auth" "" \
+    "{
+        \"grantType\":\"workspace\",
+        \"workspaceId\":\"${wsId}\",
+        \"workspaceToken\":\"${wsToken}\",
+        \"stayLoggedIn\": false
+    }" \
+    "Error logging into workspace $workspaceName"
+
+  accesstoken=$(echo "$response" | jq -r '.accessToken')
+}
+
+select_2FA_method() {
+  local methods="${1}"
+
+  # Let the user choose between available methods
+  local TWO_FA_METHODS=()
+  local methodNames=$(echo "$methods" | jq -r '.[]')
+  local methodsCount=$(echo "$methods" | jq '. | length')
+
+  for i in "${methodNames}"
+  do
+    local name=$(echo "$i" | jq -r '.type')
+    TWO_FA_METHODS+=("$name")
+  done
+
+  PS3="Choose a two-factor auth type (Available: $methodsCount): "
+  select METHOD in $TWO_FA_METHODS
+  do
+    if [ -n "$METHOD" ]
+    then
+      echo "Selected two-factor auth method: ${METHOD}"
+      selectedWorkspace=$(($REPLY - 1))
+      break
+    else
+      echo "Invalid input!"
+    fi
+  done
+  SELECTED_METHOD=$(echo "$methods" | jq .[$selectedWorkspace])
+}
+
+login_workspaces() {
+  local wsToken="${1}"
+  local workspaces="${2}"
+  local workspacesLength=$(echo "$workspaces" | jq '. | length')
+  
+  if [ $workspacesLength -eq 1 ]
+  then
+    # If only one workspace - get access token
+    local workspaceId=$(echo "$workspaces" | jq '.[0].id')
+    local workspaceName=$(echo "$workspaces" | jq '.[0].name')
+
+    get_access_token_from_workspace "$workspaceId" "$workspaceName" "$wsToken"
+  else
+    # Let the user choose between workspaces and get access token
+    local WORKSPACES=()
+    local selectedWorkspace
+    local workspaceNames=$(echo "$workspaces" | jq -r '.[]')
+    for i in "${workspaceNames}"
+    do
+      local name=$(echo "$i" | jq -r '.name')
+      local nameWithUnderscore=$(echo "$name" | sed -e 's/ /_/g')
+      WORKSPACES+=("$nameWithUnderscore")
+    done
+
+    PS3="Choose a workspace to login (Available: $workspacesLength): "
+    select WS in $WORKSPACES
+    do
+      if [ -n "$WS" ]
+      then
+        echo "Selected workspace: ${WS}"
+        selectedWorkspace=$(($REPLY - 1))
+        break
+      else
+        echo "Invalid input!"
+      fi
+    done
+
+    local selectedWorkspaceId=$(echo "$workspaces" | jq .[$selectedWorkspace].id)
+    local selectedWorkspaceName=$(echo "$workspaces" | jq .[$selectedWorkspace].name)
+
+    get_access_token_from_workspace "$selectedWorkspaceId" "$selectedWorkspaceName" "$wsToken"
+  fi
+}
+
+login_two_factor_auth() {
+  local accessTokenTwoFA="${1}"
+  local authMethods
+
+  # Get 2FA available Methods
+  execute_cloud_command "GET" "$apiinstance/v1/auth/two-factor" \
+		"Authorization: $accessTokenTwoFA" \
+		"" \
+		"Error getting two-factor authentication methods"
+
+  authMethods=$(echo "$response" | jq -r '.methods')
+  select_2FA_method "$authMethods"
+
+  local methodID=$(echo "$SELECTED_METHOD" | jq -r '.id')
+
+  execute_cloud_command "POST" "$apiinstance/v1/auth/two-factor" \
+		"Authorization: $accessTokenTwoFA" \
+    "{
+      \"twoFactorId\":\"${methodID}\"
+    }" \
+		"Error selecting two-factor authentication"
+  
+
+  # Let the user write the auth code
+  local authCode
+  read -p "Enter authentication code: " authCode
+  # checks if value is empty and if there are whitespaces
+  while [[ -z "$authCode" || "$authCode" =~ \ |\' ]]
+  do
+    read -p "Please enter valid authentication code: " authCode
+  done
+
+  # Verify two-factor authentication code and generate authorization and refresh token or workspace token
+  execute_cloud_command "POST" "$apiinstance/v1/auth/two-factor/methods/$methodID" \
+		"Authorization: $accessTokenTwoFA" \
+    "{
+      \"code\":\"${authCode}\",
+      \"tokenType\":\"workspaceToken\"
+    }" \
+		"Error Verify two-factor authentication code"
+
+  local wsToken=$(echo "$response" | jq -r '.workspaceToken')
+  local workspaces=$(echo "$response" | jq -r '.workspaces')
+
+  login_workspaces "$wsToken" "$workspaces"
+}
+
+login() {
+  local wsToken
+  local workspaces
+  local aToken
+
+  execute_cloud_command "POST" "$apiinstance/v1/auth/workspaces" "" \
+    "{
+      \"grantType\":\"password\",
+      \"email\":\"${username}\",
+      \"password\":\"${password}\"
+    }" \
+    "Error logging into account $username"
+
+  aToken=$(echo "$response" | jq -r '.accessToken')
+
+  if [ "$aToken" == null ]
+  then
+    # Login using workspace token
+    wsToken=$(echo "$response" | jq -r '.workspaceToken')
+    workspaces=$(echo "$response" | jq -r '.workspaces')
+
+    login_workspaces "$wsToken" "$workspaces"
+  else
+    # Login with two-factor authentication
+    login_two_factor_auth "$aToken"
+  fi
+}
+
 login_cloud() {
-	# Generate access token
-	if [ -n "$apikey" ]; then
-		accesstoken="$apikey"
-	else
-		execute_cloud_command "POST" "$apiinstance/v1/auth" "" \
-			"{\"grantType\":\"password\", \"email\":\"${username}\", \"password\":\"${password}\", \"stayLoggedIn\": false}" \
-			"Error logging into account $username"
-		accesstoken=$(echo "$response" | jq -r '.accessToken')
-	fi
+  if [ -n "$apikey" ]; then
+    # Use API Key
+    accesstoken="$apikey"
+  else
+    # Generate access token
+    login
+  fi
 }
 
 version_lte() {
@@ -550,11 +640,11 @@ onboard_device() {
 
 	print_verbose "iotedge: Starting connection to netFIELD.io cloud"
 	case "$iotedgeversion" in
-        1.0|1.1)
+        1.[01])
 		sed -i.bak "s@device_connection_string:.*@device_connection_string: \"$connectionstring\"@g" /etc/iotedge/config.yaml
 		systemctl enable --now iotedged
 		;;
-	1.2)
+	1.[234])
 		sed -i -e "s@^[# ]*hostname =@hostname = \"$(hostname)\"@g" /etc/aziot/edged/config.toml.default
 		iotedge config mp --connection-string "$connectionstring"
 		iotedge config apply
@@ -596,10 +686,10 @@ EOF
 }
 EOF
 	fi
-    
+
         # Define an alias for better usability
         alias docker-iotedge="docker -H unix:///run/iotedge-docker.sock"
-    
+
         echo ""
         echo "#######################################################################################################"
         echo "  Device '${HOSTNAME}' has been successfully onboarded with the created"
@@ -673,10 +763,10 @@ EOF
 	fi
 
 	case "$iotedgeversion" in
-	1.0|1.1)
+	1.[01])
 		systemctl disable --now iotedged
 		;;
-	1.2)
+	1.[234])
 		iotedge system stop
 		systemctl disable aziot-edged
 		;;
@@ -765,6 +855,11 @@ if [ -z "$username" ] && [ -z "$apikey" ]; then
 	usage
 fi
 
+if [ -n "$username" ] && [ -z "$password" ]; then
+	read -r -s -p "Enter password for $username on $instance : " password
+	echo ""
+fi
+
 if [ -d "/usr/lib/systemd/system" ]; then
 	systemd_dir="/usr/lib/systemd/system/"
 else
@@ -775,7 +870,7 @@ fi
 install_prerequisites
 
 # extract the corresponding back-end URL (https://api...) from given instance info page
-apiinstance=$(json_extract backendUrl "$(curl -s 'https://'${instance}'/info')")
+apiinstance=$(curl -s 'https://'"${instance}"'/info' | jq -r '.backendUrl')
 
 case "$1" in
 	onboard)  onboard_device ;;
