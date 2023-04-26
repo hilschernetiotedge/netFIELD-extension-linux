@@ -9,7 +9,8 @@ netFIELD Cloud delivers all the necessary infrastructure to spread intellectual 
 
 ### Installation Script
 
-The Linux bash installation script hereunder adds/removes netFIELD support for a platform running native Linux such as Ubuntu, Debian, Raspbian, or even [YOCTO](https://www.yoctoproject.org/) project-based ones.
+The Linux bash installation script hereunder adds/removes netFIELD support for a platform running native Linux such as Ubuntu, Debian, Raspbian.
+It can be used to as basic example for use i [YOCTO](https://www.yoctoproject.org/) project-based ones.
 
 During the execution, it is registering(onboarding)/unregistering(offboarding) the calling platform to/from a given netFIELD Internet presence.
 
@@ -24,7 +25,7 @@ The script installs the following Linux standard tools and services during execu
  
 The script installs the following 3rd party packages during execution (if not found installed already)
   
- - Azure IoT Edge [Runtime](https://github.com/Azure/azure-iotedge/tags)(version 1.2.x) 
+ - Azure IoT Edge [Runtime](https://github.com/Azure/azure-iotedge/tags)(version 1.4.x)
    - registering the services aziot-edged.service, aziot-keyd.service, aziot-identityd.service, aziot-certd.service for auto-start
  - docker-ce (moby-engine) (version 20.10.x)
    - the creation of a separate Unix socket for the Azure IoT-Edge controlled docker daemon
@@ -111,7 +112,7 @@ Make sure the following permissions have been granted for successful execution:
 
 ### Installation
 
-Download just the script [netfield-extension-linux-installer.sh](netfield-extension-linux-installer.sh) or the whole project with `sudo git clone https://github.com/hilschernetiotedge/netFIELD-extension-linux.git`. 
+Download just the script [netfield-extension-linux-installer.sh](netfield-extension-linux-installer.sh?raw=1) or the whole project with `sudo git clone https://github.com/hilschernetiotedge/netFIELD-extension-linux.git`. 
 
 Make sure the script has execution permission on the device else use `sudo chmod +x netfield-extension-linux-installer.sh`.
 
@@ -220,11 +221,17 @@ This software is licensed under the LICENSE.txt file information stored in the p
 
 "Microsoft" and "Azure IoT Edge" are trademarks of the Microsoft group of companies. 
 
-Copyright (c) Hilscher Gesellschaft fuer Systemautomation mbH. All rights reserved. 
+Copyright (c) Hilscher Gesellschaft fuer Systemautomation mbH. All rights reserved.
 
-[![N|Solid](images/logo_hilscher.png)](http://www.hilscher.com)  Hilscher Gesellschaft fuer Systemautomation mbH www.hilscher.com
+<div>
+  <br/>
+  <a href="http://www.hilscher.com">
+    <img src="images/logo_hilscher.png" alt="Hilscher logo" height="10%" width="10%" style="margin-right: 16px;" />
+    Hilscher Gesellschaft fuer Systemautomation mbH www.hilscher.com
+  </a>
+  <br/>
+</div>
 
-  
 ### develop * deploy * orchestrate
 
 
