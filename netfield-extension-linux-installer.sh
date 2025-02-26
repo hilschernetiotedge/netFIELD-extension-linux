@@ -1,8 +1,8 @@
 #!/bin/bash -e
-version="1.1.0"
+version="1.1.1"
 
-AZIOT_VERSION="1.4.2"
-AZIOT_IDENTITY_VERSION="1.4.1"
+AZIOT_VERSION="1.5.10"
+AZIOT_IDENTITY_VERSION="1.5.3"
 
 usage() {
 	cat <<EOF >&2
@@ -12,6 +12,7 @@ Options:
   -a, --apikey   <apikey>   : authentication method A: equals to an API key with correct authorization permissions received from cloud instance
   -u, --username <username> : alternative authentication method B, part 1: equals a username (typically named account) with correct authorization permissions
   -p, --password <password> : alternative authentication method B, part 2: equals the password of the given user/username (account)
+   --disable-remote-access    : disables remote access to the device (enabled by default)
   -i, --instance <instance> : represents the cloud back-end instance URL the script shall link the device to. Defaults to netfield.io if not specified
   -m, --manifest: lets the cloud back-end automatically execute the cloud deposited device manifest after device onboarding
   -v, --verbose : outputs detailed information for debugging purposes about the script's activities during execution
@@ -176,7 +177,7 @@ EOF
 install_prerequisites() {
 
 	case "$ID-$VERSION_ID" in
-	ubuntu-18.04|ubuntu-20.04|debian-10|debian-11|raspbian-10|raspbian-11)
+	ubuntu-18.04|ubuntu-20.04|ubuntu-22.04|ubuntu-24.04|debian-10|debian-11|debian-12|raspbian-10|raspbian-11)
 
 		print_verbose "Detected deb/apt based system"
 
@@ -255,28 +256,29 @@ install_prerequisites() {
 		setup_second_docker_instance
 
 		if ! command -v iotedge >/dev/null; then
-			
-			tmpdir=$(mktemp -d)
-			cd "$tmpdir"
 
-			os_version_arch="${ID}${VERSION_ID}_$(dpkg --print-architecture)"
-			
-			# aziot-edge depends on aziot-identity-service, which should be installed first.
-			packages="aziot-identity-service_${AZIOT_IDENTITY_VERSION}-1_${os_version_arch}.deb \
-				  aziot-edge_${AZIOT_VERSION}-1_${os_version_arch}.deb"
+            tmpdir=$(mktemp -d)
+            cd "$tmpdir"
 
-			apt-get update
+            os_version_arch="${ID}${VERSION_ID}_$(dpkg --print-architecture)"
 
-			for package in $packages; do
-				curl -s -L https://github.com/Azure/azure-iotedge/releases/download/"${AZIOT_VERSION}"/"$package" > "$package"
-				apt-get install -y "$tmpdir/$package"
-			done
+            # aziot-edge depends on aziot-identity-service, which should be installed first.
+            packages="aziot-identity-service_${AZIOT_IDENTITY_VERSION}-1_${os_version_arch}.deb \
+                    aziot-edge_${AZIOT_VERSION}-1_${os_version_arch}.deb"
 
-			cd -
-			rm -rf "$tmpdir"
+            apt-get update
 
-			# Fix wrong user permission after installation
-			usermod -a -Gaziotcs,aziotks,aziotid,aziottpm iotedge
+            for package in $packages; do
+                curl -s -L https://github.com/Azure/azure-iotedge/releases/download/"${AZIOT_VERSION}"/"$package" > "$package"
+                apt-get install -y "$tmpdir/$package"
+            done
+
+            cd -
+            rm -rf "$tmpdir"
+
+            # Fix wrong user permission after installation
+            usermod -a -Gaziotcs,aziotks,aziotid,aziottpm iotedge
+
 		fi
 
 		export PATH="$OLDPATH"
@@ -289,7 +291,7 @@ install_prerequisites() {
 	esac
 
 	# Detect iotedge version
-	iotedgeversion=$(iotedge version | cut -d ' ' -f 2 | grep -o '^1.[01234]')
+	iotedgeversion=$(iotedge version | cut -d ' ' -f 2 | grep -o '^1.[012345]')
 	print_verbose "iotedge: Detected version $iotedgeversion"
 	case "$iotedgeversion" in
 		1.[01])
@@ -298,7 +300,7 @@ install_prerequisites() {
 				   -e "s@^hostname:@hostname: \"$(hostname)\"@g" \
 				   /etc/iotedge/config.yaml
 			;;
-		1.[234])
+		1.[2345])
 			# Patch docker socket of 2nd docker instance into configuation
 			sed -i.bak -e "s@^uri =.*@uri = \"unix:///run/iotedge-docker.sock\"@g" /etc/aziot/edged/config.toml.default
 			sed -i.bak -e "s@^uri =.*@uri = \"unix:///run/iotedge-docker.sock\"@g" /etc/aziot/config.toml.edge.template
@@ -457,7 +459,7 @@ login_workspaces() {
   local wsToken="${1}"
   local workspaces="${2}"
   local workspacesLength=$(echo "$workspaces" | jq '. | length')
-  
+
   if [ $workspacesLength -eq 1 ]
   then
     # If only one workspace - get access token
@@ -518,7 +520,7 @@ login_two_factor_auth() {
       \"twoFactorId\":\"${methodID}\"
     }" \
 		"Error selecting two-factor authentication"
-  
+
 
   # Let the user write the auth code
   local authCode
@@ -644,7 +646,7 @@ onboard_device() {
 		sed -i.bak "s@device_connection_string:.*@device_connection_string: \"$connectionstring\"@g" /etc/iotedge/config.yaml
 		systemctl enable --now iotedged
 		;;
-	1.[234])
+	1.[2345])
 		sed -i -e "s@^[# ]*hostname =@hostname = \"$(hostname)\"@g" /etc/aziot/edged/config.toml.default
 		iotedge config mp --connection-string "$connectionstring"
 		iotedge config apply
@@ -662,17 +664,15 @@ instance="$instance"
 apiinstance="$apiinstance"
 EOF
 
-	# Create default gateway settings required by most netfield containers
-	if [ ! -e "/etc/gateway/settings.json" ]; then
-		mkdir -p /etc/gateway
-		cat <<EOF>/etc/gateway/settings.json
+	# Create or overwrite the default gateway settings which is required by most netfield containers
+	mkdir -p /etc/gateway
+	cat <<EOF>/etc/gateway/settings.json
 {
   "schemaVersion": 1,
   "gatewayPrefix": "$serial_number",
-  "remote-access": "off"
+  "remote-access": "$( [ "$disable_remote_access" == 'true' ] && echo "off" || echo "on" )"
 }
 EOF
-	fi
 
 	# Create default mqtt configuration required by most netfield containers
 	if [ ! -e "/etc/gateway/mqtt-config.json" ]; then
@@ -766,7 +766,7 @@ EOF
 	1.[01])
 		systemctl disable --now iotedged
 		;;
-	1.[234])
+	1.[2345])
 		iotedge system stop
 		systemctl disable aziot-edged
 		;;
@@ -774,6 +774,7 @@ EOF
 
 	rm /etc/netfield.io
 	rm -f /etc/aziot/config.toml
+	rm -f /etc/gateway/settings.json
 
 	if systemctl is-enabled iotedge-containerd.service &> /dev/null; then
 		additional_services="iotedge-containerd.service"
@@ -828,6 +829,7 @@ fi
 instance="netfield.io"
 upstream_proto="AMQPWS"
 manifest="false"
+disable_remote_access="false"
 
 while true; do
 	case "$1" in
@@ -837,6 +839,7 @@ while true; do
 	-i|--instance) instance=$2; shift 2 ;;
 	-v|--verbose)  verbose="1";  shift   ;;
 	-m|--manifest) manifest="true"; shift ;;
+	--disable-remote-access) disable_remote_access="true"; shift ;;
 	-h|--help) usage ;;
 	-*) usage ;;
 	*) break ;;
